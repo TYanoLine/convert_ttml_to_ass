@@ -138,8 +138,10 @@ def get_vertical_char_text(char):
     return glyph, rotation_tag
 
 
-def get_vertical_char_italic_tag(char, italic_tag):
-    return r"{\i0}" if char in VERTICAL_NON_ITALIC_CHARS else italic_tag
+def get_vertical_char_style_tag(char, italic, font_shear):
+    if char in VERTICAL_NON_ITALIC_CHARS:
+        return build_ass_style_tag(disable_italic=True, font_shear=font_shear)
+    return build_ass_style_tag(italic=italic, font_shear=font_shear)
 
 
 def get_vertical_char_offsets(char, rotation_tag):
@@ -178,6 +180,79 @@ def collect_ruby_styles(root, ns):
         if ruby_type in ruby_styles:
             ruby_styles[ruby_type].add(style_id)
     return ruby_styles
+
+
+def collect_style_definitions(root, ns):
+    # 斜体やシアーなどの見た目判定に使う style 定義を参照しやすい形へまとめる。
+    style_definitions = {}
+    for style in root.findall(".//tt:style", ns):
+        style_id = style.get(f"{{{XML_NS}}}id")
+        if not style_id:
+            continue
+        style_definitions[style_id] = {
+            "font_style": style.get(f"{{{TTS_NS}}}fontStyle"),
+            "font_shear": style.get(f"{{{TTS_NS}}}fontShear"),
+            "style_refs": style.get("style", "").split(),
+        }
+    return style_definitions
+
+
+def resolve_style_property(style_id, style_definitions, property_name, seen=None):
+    if seen is None:
+        seen = set()
+    if style_id in seen:
+        return None
+    seen.add(style_id)
+
+    style_definition = style_definitions.get(style_id)
+    if style_definition is None:
+        return None
+
+    property_value = style_definition[property_name]
+    if property_value:
+        return property_value
+
+    for parent_style_id in style_definition["style_refs"]:
+        inherited_value = resolve_style_property(parent_style_id, style_definitions, property_name, seen)
+        if inherited_value:
+            return inherited_value
+    return None
+
+
+def parse_font_shear(font_shear):
+    if not font_shear:
+        return 0.0
+    if font_shear.endswith("%"):
+        return -float(font_shear[:-1]) / 100
+    return -float(font_shear)
+
+
+def resolve_element_style(elem, style_definitions):
+    # 要素自身の指定を優先し、なければ参照 style をたどって fontStyle / fontShear を解決する。
+    font_style = elem.get(f"{{{TTS_NS}}}fontStyle")
+    font_shear = elem.get(f"{{{TTS_NS}}}fontShear")
+
+    for style_id in elem.get("style", "").split():
+        if not font_style:
+            font_style = resolve_style_property(style_id, style_definitions, "font_style")
+        if not font_shear:
+            font_shear = resolve_style_property(style_id, style_definitions, "font_shear")
+
+    return {
+        "italic": font_style == "italic",
+        "font_shear": parse_font_shear(font_shear),
+    }
+
+
+def build_ass_style_tag(italic=False, font_shear=0.0, disable_italic=False):
+    commands = []
+    if disable_italic:
+        commands.append(r"\i0")
+    elif italic or font_shear:
+        commands.append(r"\i1")
+    if font_shear:
+        commands.append(rf"\fax{font_shear:.4f}")
+    return "{" + "".join(commands) + "}" if commands else ""
 
 
 def find_first_descendant_with_style(elem, style_ids):
@@ -246,12 +321,34 @@ def has_ruby(parts):
     return any(part[0] == "ruby" for part in parts)
 
 
-def render_standard_dialogue(ass_lines, start, end, style_name, italic_tag, parts):
+def get_ruby_line_positions(lines):
+    # 下の行にルビがある場合は、その分だけ上の行を追加で押し上げて重なりを防ぐ。
+    if not lines:
+        return []
+
+    ruby_line_height = BASE_FS + RUBY_FS + RUBY_GAP
+    positions = [0.0] * len(lines)
+    current_y = PLAY_RES_Y - GLOBAL_MARGIN_V
+
+    for line_index in range(len(lines) - 1, -1, -1):
+        positions[line_index] = current_y
+        if line_index == 0:
+            continue
+
+        line_gap = LINE_HEIGHT
+        if has_ruby(lines[line_index]):
+            line_gap = max(line_gap, ruby_line_height)
+        current_y -= line_gap
+
+    return positions
+
+
+def render_standard_dialogue(ass_lines, start, end, style_name, style_tag, parts):
     text = "".join(
         escape_ass_text(base_text(part)) if part[0] != "br" else r"\N"
         for part in parts
     )
-    ass_lines.append(f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{italic_tag}{text}")
+    ass_lines.append(f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{style_tag}{text}")
 
 
 def render_positioned_ruby_dialogues(
@@ -260,20 +357,20 @@ def render_positioned_ruby_dialogues(
     start,
     end,
     italic,
-    italic_tag,
+    style_tag,
     lines,
 ):
     # ルビ付き行はベース文字列を中央配置し、その上にルビを個別配置する。
     layer = 0
-    base_y = PLAY_RES_Y - GLOBAL_MARGIN_V
     center_x = PLAY_RES_X / 2
+    line_positions = get_ruby_line_positions(lines)
 
     for line_index, line_parts in enumerate(lines):
-        line_y = base_y - (len(lines) - 1 - line_index) * LINE_HEIGHT
+        line_y = line_positions[line_index]
         visible_line = escape_ass_text(plain_text(line_parts))
         ass_lines.append(
             f"Dialogue: {layer},{start},{end},Default,,0,0,0,,"
-            f"{{\\an2\\pos({center_x:.1f},{line_y:.1f})}}{italic_tag}{visible_line}"
+            f"{{\\an2\\pos({center_x:.1f},{line_y:.1f})}}{style_tag}{visible_line}"
         )
 
         line_width = measurer.measure(plain_text(line_parts), BASE_FS, italic)
@@ -291,7 +388,7 @@ def render_positioned_ruby_dialogues(
             ass_lines.append(
                 f"Dialogue: {layer + 1},{start},{end},Default,,0,0,0,,"
                 f"{{\\an8\\pos({ruby_center_x:.1f},{ruby_top_y:.1f})\\fs{RUBY_FS}}}"
-                f"{italic_tag}{escape_ass_text(ruby)}"
+                f"{style_tag}{escape_ass_text(ruby)}"
             )
             layer += 1
             cursor_x += base_width
@@ -299,7 +396,7 @@ def render_positioned_ruby_dialogues(
         layer += 1
 
 
-def render_positioned_vertical_dialogues(ass_lines, start, end, italic_tag, lines):
+def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_shear, lines):
     # 縦書きは 1 文字ずつ絶対配置して、記号ごとの補正もここで反映する。
     region_top = PLAY_RES_Y * 0.1
     region_height = PLAY_RES_Y * 0.8
@@ -321,7 +418,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic_tag, line
                 continue
 
             glyph, rotation_tag = get_vertical_char_text(char)
-            char_italic_tag = get_vertical_char_italic_tag(char, italic_tag)
+            char_style_tag = get_vertical_char_style_tag(char, italic, font_shear)
             offset_x, offset_y = get_vertical_char_offsets(char, rotation_tag)
             cell_center_x = line_x + offset_x
             cell_center_y = cursor_y + char_step / 2 + offset_y
@@ -329,7 +426,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic_tag, line
             ass_lines.append(
                 f"Dialogue: {layer},{start},{end},Default,,0,0,0,,"
                 f"{{\\an5\\pos({cell_center_x:.1f},{cell_center_y:.1f}){rotation_tag}}}"
-                f"{char_italic_tag}{escape_ass_text(glyph)}"
+                f"{char_style_tag}{escape_ass_text(glyph)}"
             )
             layer += 1
             cursor_y += char_step
@@ -347,6 +444,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
     tree = ET.parse(ttml_input)
     root = tree.getroot()
     ruby_styles = collect_ruby_styles(root, ns)
+    style_definitions = collect_style_definitions(root, ns)
 
     ass_lines = [
         "[Script Info]",
@@ -382,11 +480,12 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
                 continue
 
             region = p.get("region")
-            style_id = p.get("style")
             style_name = "Vertical" if region == "縦右" else "Default"
-            # 斜体指定は入力 TTML 側の既知スタイル ID に基づいて判定している。
-            italic = style_id in {"s1", "s4"}
-            italic_tag = r"{\i1}" if italic else ""
+            # 固定の style ID ではなく、TTML 側の fontStyle / fontShear 定義から判定する。
+            resolved_style = resolve_element_style(p, style_definitions)
+            italic = resolved_style["italic"]
+            font_shear = resolved_style["font_shear"]
+            style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear)
 
             parts = get_all_parts(p, ns, ruby_styles)
 
@@ -395,11 +494,12 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
                     ass_lines,
                     start,
                     end,
-                    italic_tag,
+                    italic,
+                    font_shear,
                     split_lines(parts),
                 )
             elif not has_ruby(parts):
-                render_standard_dialogue(ass_lines, start, end, style_name, italic_tag, parts)
+                render_standard_dialogue(ass_lines, start, end, style_name, style_tag, parts)
             else:
                 render_positioned_ruby_dialogues(
                     ass_lines,
@@ -407,7 +507,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
                     start,
                     end,
                     italic,
-                    italic_tag,
+                    style_tag,
                     split_lines(parts),
                 )
 
@@ -430,3 +530,4 @@ if __name__ == "__main__":
 
     convert_ttml_to_ass(ttml_input, ass_output, offset)
     print(f"Ruby conversion complete: {ass_output}")
+
