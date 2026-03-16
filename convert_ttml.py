@@ -343,6 +343,33 @@ def get_ruby_line_positions(lines):
     return positions
 
 
+def get_vertical_line_positions(lines, start_x, column_step):
+    # ルビ付きの列は右側にルビ領域を使うので、左隣の列との間隔を広げる。
+    if not lines:
+        return []
+
+    ruby_column_step = BASE_FS + RUBY_GAP + RUBY_FS
+    positions = [0.0] * len(lines)
+    positions[0] = start_x
+
+    for line_index in range(1, len(lines)):
+        gap = ruby_column_step if has_ruby(lines[line_index]) else column_step
+        positions[line_index] = positions[line_index - 1] - gap
+
+    return positions
+
+
+def append_vertical_dialogue(ass_lines, layer, start, end, x, y, text, style_tag, font_size=None, rotation_tag=""):
+    prefix = rf"{{\an5\pos({x:.1f},{y:.1f})"
+    if font_size is not None:
+        prefix += rf"\fs{font_size}"
+    prefix += rotation_tag + "}"
+    ass_lines.append(
+        f"Dialogue: {layer},{start},{end},Default,,0,0,0,,"
+        f"{prefix}{style_tag}{escape_ass_text(text)}"
+    )
+
+
 def render_standard_dialogue(ass_lines, start, end, style_name, style_tag, parts):
     text = "".join(
         escape_ass_text(base_text(part)) if part[0] != "br" else r"\N"
@@ -407,29 +434,94 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
     max_chars = max((len(plain_text(line_parts)) for line_parts in lines), default=1)
     char_step = min(BASE_FS, region_height / max_chars)
     start_y = region_top + max((region_height - max_chars * char_step) / 2, 0)
+    line_positions = get_vertical_line_positions(lines, start_x, column_step)
 
     layer = 0
     for line_index, line_parts in enumerate(lines):
-        line_x = start_x - line_index * column_step
+        line_x = line_positions[line_index]
         cursor_y = start_y
-        for char in plain_text(line_parts):
-            if char == " ":
-                cursor_y += char_step
+        for part in line_parts:
+            if part[0] == "text":
+                for char in part[1]:
+                    if char == " ":
+                        cursor_y += char_step
+                        continue
+
+                    glyph, rotation_tag = get_vertical_char_text(char)
+                    char_style_tag = get_vertical_char_style_tag(char, italic, font_shear)
+                    offset_x, offset_y = get_vertical_char_offsets(char, rotation_tag)
+                    cell_center_x = line_x + offset_x
+                    cell_center_y = cursor_y + char_step / 2 + offset_y
+                    append_vertical_dialogue(
+                        ass_lines,
+                        layer,
+                        start,
+                        end,
+                        cell_center_x,
+                        cell_center_y,
+                        glyph,
+                        char_style_tag,
+                        rotation_tag=rotation_tag,
+                    )
+                    layer += 1
+                    cursor_y += char_step
                 continue
 
-            glyph, rotation_tag = get_vertical_char_text(char)
-            char_style_tag = get_vertical_char_style_tag(char, italic, font_shear)
-            offset_x, offset_y = get_vertical_char_offsets(char, rotation_tag)
-            cell_center_x = line_x + offset_x
-            cell_center_y = cursor_y + char_step / 2 + offset_y
+            base, ruby = part[1]
+            base_chars = [char for char in base if char != " "]
+            base_span = max(len(base_chars), 1) * char_step
+            base_start_y = cursor_y
 
-            ass_lines.append(
-                f"Dialogue: {layer},{start},{end},Default,,0,0,0,,"
-                f"{{\\an5\\pos({cell_center_x:.1f},{cell_center_y:.1f}){rotation_tag}}}"
-                f"{char_style_tag}{escape_ass_text(glyph)}"
-            )
-            layer += 1
-            cursor_y += char_step
+            for char in base:
+                if char == " ":
+                    cursor_y += char_step
+                    continue
+
+                glyph, rotation_tag = get_vertical_char_text(char)
+                char_style_tag = get_vertical_char_style_tag(char, italic, font_shear)
+                offset_x, offset_y = get_vertical_char_offsets(char, rotation_tag)
+                cell_center_x = line_x + offset_x
+                cell_center_y = cursor_y + char_step / 2 + offset_y
+                append_vertical_dialogue(
+                    ass_lines,
+                    layer,
+                    start,
+                    end,
+                    cell_center_x,
+                    cell_center_y,
+                    glyph,
+                    char_style_tag,
+                    rotation_tag=rotation_tag,
+                )
+                layer += 1
+                cursor_y += char_step
+
+            ruby_chars = list(ruby)
+            if not ruby_chars:
+                continue
+
+            ruby_step = min(RUBY_FS, base_span / len(ruby_chars))
+            ruby_start_y = base_start_y + max((base_span - ruby_step * len(ruby_chars)) / 2, 0)
+            ruby_x = line_x + BASE_FS / 2 + RUBY_GAP + RUBY_FS / 2
+            ruby_style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear)
+
+            for ruby_index, ruby_char in enumerate(ruby_chars):
+                glyph, rotation_tag = get_vertical_char_text(ruby_char)
+                offset_x, offset_y = get_vertical_char_offsets(ruby_char, rotation_tag)
+                ruby_center_y = ruby_start_y + ruby_step * ruby_index + ruby_step / 2 + offset_y
+                append_vertical_dialogue(
+                    ass_lines,
+                    layer,
+                    start,
+                    end,
+                    ruby_x + offset_x,
+                    ruby_center_y,
+                    glyph,
+                    ruby_style_tag,
+                    font_size=RUBY_FS,
+                    rotation_tag=rotation_tag,
+                )
+                layer += 1
 
 
 def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
