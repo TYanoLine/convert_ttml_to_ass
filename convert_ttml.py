@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from functools import lru_cache
 
 
+# ASS 出力時の基本レイアウト設定。
 PLAY_RES_X = 1280
 PLAY_RES_Y = 720
 BASE_FS = 54
@@ -59,6 +60,7 @@ class TextMeasurer:
     FF_DONTCARE = 0
 
     def __init__(self, font_name):
+        # Windows GDI を使って文字列幅を実測し、ルビの配置計算に使う。
         self.font_name = font_name
         self.dc = ctypes.windll.gdi32.CreateCompatibleDC(0)
         if not self.dc:
@@ -80,6 +82,7 @@ class TextMeasurer:
         self.close()
 
     def _get_font(self, size, italic):
+        # サイズと斜体有無ごとにフォントを再利用して GDI オブジェクト生成を抑える。
         key = (size, italic)
         if key not in self.fonts:
             font = ctypes.windll.gdi32.CreateFontW(
@@ -105,6 +108,7 @@ class TextMeasurer:
 
     @lru_cache(maxsize=4096)
     def measure(self, text, size, italic=False):
+        # 同じ文字列の計測結果はキャッシュしてレイアウト計算を軽くする。
         if not text:
             return 0
 
@@ -128,6 +132,7 @@ def escape_ass_text(text):
 
 
 def get_vertical_char_text(char):
+    # 縦書き用に字形差し替えが必要な文字と、90 度回転が必要な文字を処理する。
     glyph = VERTICAL_CHAR_MAP.get(char, char)
     rotation_tag = r"\frz90" if char in VERTICAL_ROTATE_CHARS else ""
     return glyph, rotation_tag
@@ -138,6 +143,7 @@ def get_vertical_char_italic_tag(char, italic_tag):
 
 
 def get_vertical_char_offsets(char, rotation_tag):
+    # 一部の約物は縦書き時に見た目がずれるため、個別オフセットを足す。
     offset_x, offset_y = VERTICAL_CHAR_OFFSET_MAP.get(char, (0, 0))
     if rotation_tag:
         offset_x += VERTICAL_ROTATE_OFFSET_X
@@ -162,6 +168,7 @@ def format_time_seconds(total_seconds):
 
 
 def collect_ruby_styles(root, ns):
+    # style 定義からルビ関連のスタイル ID を収集しておく。
     ruby_styles = {"container": set(), "base": set(), "text": set()}
     for style in root.findall(".//tt:style", ns):
         style_id = style.get(f"{{{XML_NS}}}id")
@@ -183,6 +190,7 @@ def find_first_descendant_with_style(elem, style_ids):
 
 
 def get_all_parts(elem, ns, ruby_styles):
+    # TTML の p 要素配下を、通常文字列・改行・ルビ付き文字列の並びへ平坦化する。
     parts = []
     if elem.text:
         parts.append(("text", elem.text))
@@ -214,6 +222,7 @@ def get_all_parts(elem, ns, ruby_styles):
 
 
 def split_lines(parts):
+    # br を境に ASS の行単位へ分割する。
     lines = [[]]
     for part in parts:
         if part[0] == "br":
@@ -254,6 +263,7 @@ def render_positioned_ruby_dialogues(
     italic_tag,
     lines,
 ):
+    # ルビ付き行はベース文字列を中央配置し、その上にルビを個別配置する。
     layer = 0
     base_y = PLAY_RES_Y - GLOBAL_MARGIN_V
     center_x = PLAY_RES_X / 2
@@ -290,6 +300,7 @@ def render_positioned_ruby_dialogues(
 
 
 def render_positioned_vertical_dialogues(ass_lines, start, end, italic_tag, lines):
+    # 縦書きは 1 文字ずつ絶対配置して、記号ごとの補正もここで反映する。
     region_top = PLAY_RES_Y * 0.1
     region_height = PLAY_RES_Y * 0.8
     region_right = PLAY_RES_X - PLAY_RES_X * 0.1
@@ -325,6 +336,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic_tag, line
 
 
 def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
+    # TTML を解析し、横書き・縦書き・ルビの各ケースに応じて ASS を組み立てる。
     ns = {
         "tt": "http://www.w3.org/ns/ttml",
         "tts": "http://www.w3.org/ns/ttml#styling",
@@ -372,6 +384,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
             region = p.get("region")
             style_id = p.get("style")
             style_name = "Vertical" if region == "縦右" else "Default"
+            # 斜体指定は入力 TTML 側の既知スタイル ID に基づいて判定している。
             italic = style_id in {"s1", "s4"}
             italic_tag = r"{\i1}" if italic else ""
 
@@ -403,6 +416,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
 
 
 if __name__ == "__main__":
+    # 引数: offset, input.ttml, output.ass の順。未指定時はサンプル名を使う。
     offset = 0
     ttml_input = "sample.ttml"
     ass_output = "sample_offset.ass"
