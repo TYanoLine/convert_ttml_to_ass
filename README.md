@@ -15,11 +15,11 @@ This tool is **Windows-only**.
 ### 基本的な使用法 / Basic Usage
 
 ```bash
-# TTML ファイルを ASS に変換（オフセト指定）
+# TTML ファイルを ASS に変換（オフセット指定）
 python convert_ttml.py 0:00:00.00 input.ttml output.ass
 
-# 文法チェック
-python -m py_compile convert_ttml.py
+# FFmpeg を使用した ASS ファイルの使用例
+ffmpeg -i input.mp4 -vf ass=output.ass output.mp4
 ```
 
 第1引数はオフセット時刻（`HH:MM:SS.mmm` 形式）です。  
