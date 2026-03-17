@@ -182,6 +182,17 @@ def collect_ruby_styles(root, ns):
     return ruby_styles
 
 
+def collect_tate_chu_yoko_styles(root, ns):
+    # tts:textCombine="all" で指定された縦中横スタイル ID を収集する。
+    tate_chu_yoko_styles = set()
+    for style in root.findall(".//tt:style", ns):
+        style_id = style.get(f"{{{XML_NS}}}id")
+        text_combine = style.get(f"{{{TTS_NS}}}textCombine")
+        if style_id and text_combine == "all":
+            tate_chu_yoko_styles.add(style_id)
+    return tate_chu_yoko_styles
+
+
 def collect_style_definitions(root, ns):
     # 斜体やシアーなどの見た目判定に使う style 定義を参照しやすい形へまとめる。
     style_definitions = {}
@@ -427,8 +438,9 @@ def render_positioned_ruby_dialogues(
         layer += 1
 
 
-def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_shear, lines):
+def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_shear, lines, tate_chu_yoko_styles):
     # 縦書きは 1 文字ずつ絶対配置して、記号ごとの補正もここで反映する。
+    # Y配置は上部10%マージンから上寄せで開始。
     region_top = PLAY_RES_Y * 0.1
     region_height = PLAY_RES_Y * 0.8
     region_right = PLAY_RES_X - PLAY_RES_X * 0.1
@@ -437,7 +449,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
 
     max_chars = max((len(plain_text(line_parts)) for line_parts in lines), default=1)
     char_step = min(BASE_FS, region_height / max_chars)
-    start_y = region_top + max((region_height - max_chars * char_step) / 2, 0)
+    start_y = region_top
     line_positions = get_vertical_line_positions(lines, start_x, column_step)
 
     layer = 0
@@ -446,7 +458,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
         cursor_y = start_y
         for part in line_parts:
             style = part[2]
-            if style == "s9":  # 縦中横 (Tate-chu-yoko)
+            if style in tate_chu_yoko_styles:  # 縦中横 (Tate-chu-yoko)
                 text = part[1]
                 # Scale font width to half and center align
                 char_style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear, scale_x=50)
@@ -562,6 +574,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
     root = tree.getroot()
     ruby_styles = collect_ruby_styles(root, ns)
     style_definitions = collect_style_definitions(root, ns)
+    tate_chu_yoko_styles = collect_tate_chu_yoko_styles(root, ns)
 
     ass_lines = [
         "[Script Info]",
@@ -614,6 +627,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
                     italic,
                     font_shear,
                     split_lines(parts),
+                    tate_chu_yoko_styles,
                 )
             elif not has_ruby(parts):
                 render_standard_dialogue(ass_lines, start, end, style_name, style_tag, parts)
