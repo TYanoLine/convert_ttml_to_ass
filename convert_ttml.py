@@ -460,8 +460,8 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
             style = part[2]
             if style in tate_chu_yoko_styles:  # 縦中横 (Tate-chu-yoko)
                 text = part[1]
-                # Scale font width to half and center align
-                char_style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear, scale_x=50)
+                # Scale font width to 70% and center align
+                char_style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear, scale_x=70)
                 cell_center_x = line_x
                 cell_center_y = cursor_y + char_step / 2
                 append_vertical_dialogue(
