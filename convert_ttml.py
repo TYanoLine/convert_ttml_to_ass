@@ -412,7 +412,7 @@ def render_positioned_ruby_dialogues(
         visible_line = escape_ass_text(plain_text(line_parts))
         ass_lines.append(
             f"Dialogue: {layer},{start},{end},Default,,0,0,0,,"
-            f"{{\an2\pos({center_x:.1f},{line_y:.1f})}}{style_tag}{visible_line}"
+            fr"{{\an2\pos({center_x:.1f},{line_y:.1f})}}{style_tag}{visible_line}"
         )
 
         line_width = measurer.measure(plain_text(line_parts), BASE_FS, italic)
@@ -429,7 +429,7 @@ def render_positioned_ruby_dialogues(
             ruby_top_y = line_y - BASE_FS - RUBY_FS - RUBY_GAP
             ass_lines.append(
                 f"Dialogue: {layer + 1},{start},{end},Default,,0,0,0,,"
-                f"{{\an8\pos({ruby_center_x:.1f},{ruby_top_y:.1f})\fs{RUBY_FS}}}"
+                fr"{{\an8\pos({ruby_center_x:.1f},{ruby_top_y:.1f})\fs{RUBY_FS}}}"
                 f"{style_tag}{escape_ass_text(ruby)}"
             )
             layer += 1
@@ -647,17 +647,43 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
 
 
 if __name__ == "__main__":
-    # 引数: offset, input.ttml, output.ass の順。未指定時はサンプル名を使う。
-    offset = 0
-    ttml_input = "sample.ttml"
-    ass_output = "sample_offset.ass"
-    if len(sys.argv) > 1:
-        ts = sys.argv[1].split(":")
-        offset = int(ts[0]) * 3600 + int(ts[1]) * 60 + float(ts[2])
-    if len(sys.argv) > 2:
-        ttml_input = sys.argv[2]
-    if len(sys.argv) > 3:
-        ass_output = sys.argv[3]
+    import argparse
 
-    convert_ttml_to_ass(ttml_input, ass_output, offset)
-    print(f"Ruby conversion complete: {ass_output}")
+    parser = argparse.ArgumentParser(
+        description="Convert TTML subtitles to ASS format with ruby and vertical text support.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Example:\n  python convert_ttml.py input.ttml output.ass --offset 0:00:05.00"
+    )
+    parser.add_argument("input", help="Input TTML file path")
+    parser.add_argument("output", help="Output ASS file path")
+    parser.add_argument(
+        "-o", "--offset",
+        default="0:00:00.00",
+        help="Offset time to subtract (format HH:MM:SS.mmm, default: 0:00:00.00)"
+    )
+
+    # 引数がない場合はヘルプを表示
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(1)
+
+    args = parser.parse_args()
+
+    try:
+        # オフセット文字列を秒数に変換
+        ts = args.offset.split(":")
+        if len(ts) == 3:
+            offset_sec = int(ts[0]) * 3600 + int(ts[1]) * 60 + float(ts[2])
+        else:
+            # HH:MM:SS 形式でない場合は直接数値（秒）として扱う試行
+            offset_sec = float(args.offset)
+    except Exception:
+        print(f"Error: Invalid offset format '{args.offset}'. Use HH:MM:SS.mmm or seconds.")
+        sys.exit(1)
+
+    try:
+        convert_ttml_to_ass(args.input, args.output, offset_sec)
+        print(f"Successfully converted: {args.input} -> {args.output}")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
