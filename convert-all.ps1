@@ -1,6 +1,6 @@
 Get-ChildItem $args[0] -Recurse -Filter *.ja-Jp.*.ttml | ForEach-Object {
     $filePath = $_.FullName
-    # $filePath の .ja-jp～.ttmlを.mp4に置換
+    # $filePath の .ja-jp～.ttmlを.assに置換
     $newFilePath = $filePath -replace '\.ja-Jp\..*\.ttml$', '.ass'
     # $newFilePath が存在するかどうかをチェック
     if (Test-Path $newFilePath) {
