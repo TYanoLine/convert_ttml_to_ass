@@ -13,6 +13,8 @@ FONT_NAME = "BIZ UDPGothic"
 GLOBAL_MARGIN_V = 100
 LINE_HEIGHT = 64
 RUBY_GAP = 6
+VERTICAL_ITALIC_MIN_GAP_RATIO = 0.35
+VERTICAL_ITALIC_GAP_SCALE = 1.35
 TTS_NS = "http://www.w3.org/ns/ttml#styling"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 VERTICAL_CHAR_MAP = {
@@ -208,6 +210,56 @@ def collect_style_definitions(root, ns):
     return style_definitions
 
 
+def collect_region_definitions(root, ns):
+    # region の writingMode / position を集め、縦書き判定と左右配置に使う。
+    region_definitions = {}
+    for region in root.findall(".//tt:region", ns):
+        region_id = region.get(f"{{{XML_NS}}}id")
+        if not region_id:
+            continue
+        region_definitions[region_id] = {
+            "writing_mode": region.get(f"{{{TTS_NS}}}writingMode"),
+            "position": region.get(f"{{{TTS_NS}}}position"),
+        }
+    return region_definitions
+
+
+def iter_paragraphs_with_region(elem, inherited_region=None):
+    # p 要素の実効 region を、親要素の継承を含めて解決しながら列挙する。
+    current_region = elem.get("region") or inherited_region
+    if elem.tag.endswith("p"):
+        yield elem, current_region
+
+    for child in elem:
+        yield from iter_paragraphs_with_region(child, current_region)
+
+
+def is_vertical_region(region_id, region_definitions):
+    region_definition = region_definitions.get(region_id, {})
+    writing_mode = region_definition.get("writing_mode")
+    if writing_mode and writing_mode.startswith("tb"):
+        return True
+    return bool(region_id and "縦" in region_id)
+
+
+def resolve_vertical_region_side(region_id, region_definitions):
+    # 既知の region 名を優先し、なければ position の left/right から左右を推定する。
+    if region_id:
+        if "右" in region_id:
+            return "right"
+        if "左" in region_id:
+            return "left"
+
+    region_definition = region_definitions.get(region_id, {})
+    position = region_definition.get("position")
+    if position:
+        anchor = position.split()[0]
+        if anchor in {"left", "right"}:
+            return anchor
+
+    return "right"
+
+
 def resolve_style_property(style_id, style_definitions, property_name, seen=None):
     if seen is None:
         seen = set()
@@ -358,20 +410,57 @@ def get_ruby_line_positions(lines):
     return positions
 
 
-def get_vertical_line_positions(lines, start_x, column_step):
+def get_vertical_line_positions(lines, start_x, column_step, direction, extra_gap=0.0):
     # ルビ付きの列は右側にルビ領域を使うので、左隣の列との間隔を広げる。
     if not lines:
         return []
 
-    ruby_column_step = BASE_FS + RUBY_GAP + RUBY_FS
+    ruby_column_step = BASE_FS + RUBY_GAP + RUBY_FS + extra_gap
     positions = [0.0] * len(lines)
     positions[0] = start_x
 
     for line_index in range(1, len(lines)):
         gap = ruby_column_step if has_ruby(lines[line_index]) else column_step
-        positions[line_index] = positions[line_index - 1] - gap
+        positions[line_index] = positions[line_index - 1] + direction * gap
 
     return positions
+
+
+def iter_vertical_visible_chars(lines):
+    for line_parts in lines:
+        for part_type, payload, _ in line_parts:
+            if part_type == "text":
+                for char in payload:
+                    if char != " ":
+                        yield char
+                continue
+
+            base, ruby = payload
+            for char in base:
+                if char != " ":
+                    yield char
+            for char in ruby:
+                if char != " ":
+                    yield char
+
+
+def get_vertical_italic_overhang(lines, italic, font_shear, measurer):
+    # 実文字の幅差と fontShear を合算し、縦列同士が重ならない余白を動的に決める。
+    if not italic and not font_shear:
+        return 0.0
+
+    unique_chars = set(iter_vertical_visible_chars(lines))
+
+    italic_extra = 0.0
+    if italic and unique_chars:
+        for char in unique_chars:
+            normal_width = measurer.measure(char, BASE_FS, False)
+            italic_width = measurer.measure(char, BASE_FS, True)
+            italic_extra = max(italic_extra, italic_width - normal_width)
+        italic_extra = max(italic_extra, BASE_FS * VERTICAL_ITALIC_MIN_GAP_RATIO)
+
+    shear_extra = BASE_FS * abs(font_shear) if font_shear else 0.0
+    return (italic_extra + shear_extra) * VERTICAL_ITALIC_GAP_SCALE
 
 
 def append_vertical_dialogue(ass_lines, layer, start, end, x, y, text, style_tag, font_size=None, rotation_tag=""):
@@ -438,19 +527,34 @@ def render_positioned_ruby_dialogues(
         layer += 1
 
 
-def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_shear, lines, tate_chu_yoko_styles):
+def render_positioned_vertical_dialogues(
+    ass_lines,
+    measurer,
+    start,
+    end,
+    italic,
+    font_shear,
+    lines,
+    tate_chu_yoko_styles,
+    region_side,
+):
     # 縦書きは 1 文字ずつ絶対配置して、記号ごとの補正もここで反映する。
     # Y配置は上部10%マージンから上寄せで開始。
     region_top = PLAY_RES_Y * 0.1
     region_height = PLAY_RES_Y * 0.8
     region_right = PLAY_RES_X - PLAY_RES_X * 0.1
-    start_x = region_right - BASE_FS / 2
-    column_step = LINE_HEIGHT
+    region_left = PLAY_RES_X * 0.1
+    direction = -1 if region_side == "right" else 1
+    start_x = region_right - BASE_FS / 2 if region_side == "right" else region_left + BASE_FS / 2
+    italic_overhang = get_vertical_italic_overhang(lines, italic, font_shear, measurer)
+    column_step = LINE_HEIGHT + italic_overhang
 
     max_chars = max((len(plain_text(line_parts)) for line_parts in lines), default=1)
     char_step = min(BASE_FS, region_height / max_chars)
+    # 行送りより大きいフォントを使うと同一列で上下が重なるため、縦書き時は追従させる。
+    effective_base_fs = max(24, min(BASE_FS, char_step * 0.92))
     start_y = region_top
-    line_positions = get_vertical_line_positions(lines, start_x, column_step)
+    line_positions = get_vertical_line_positions(lines, start_x, column_step, direction, italic_overhang)
 
     layer = 0
     for line_index, line_parts in enumerate(lines):
@@ -473,6 +577,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
                     cell_center_y,
                     text,
                     char_style_tag,
+                    font_size=effective_base_fs,
                 )
                 layer += 1
                 cursor_y += char_step
@@ -498,6 +603,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
                         cell_center_y,
                         glyph,
                         char_style_tag,
+                        font_size=effective_base_fs,
                         rotation_tag=rotation_tag,
                     )
                     layer += 1
@@ -528,6 +634,7 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
                     cell_center_y,
                     glyph,
                     char_style_tag,
+                    font_size=effective_base_fs,
                     rotation_tag=rotation_tag,
                 )
                 layer += 1
@@ -539,7 +646,8 @@ def render_positioned_vertical_dialogues(ass_lines, start, end, italic, font_she
 
             ruby_step = min(RUBY_FS, base_span / len(ruby_chars))
             ruby_start_y = base_start_y + max((base_span - ruby_step * len(ruby_chars)) / 2, 0)
-            ruby_x = line_x + BASE_FS / 2 + RUBY_GAP + RUBY_FS / 2
+            ruby_side_sign = -direction
+            ruby_x = line_x + ruby_side_sign * (BASE_FS / 2 + RUBY_GAP + RUBY_FS / 2 + italic_overhang)
             ruby_style_tag = build_ass_style_tag(italic=italic, font_shear=font_shear)
 
             for ruby_index, ruby_char in enumerate(ruby_chars):
@@ -575,6 +683,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
     ruby_styles = collect_ruby_styles(root, ns)
     style_definitions = collect_style_definitions(root, ns)
     tate_chu_yoko_styles = collect_tate_chu_yoko_styles(root, ns)
+    region_definitions = collect_region_definitions(root, ns)
 
     ass_lines = [
         "[Script Info]",
@@ -598,19 +707,20 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
         raise ValueError("TTML body not found")
 
     with TextMeasurer(FONT_NAME) as measurer:
-        for p in body.findall(".//tt:p", ns):
+        for p, region in iter_paragraphs_with_region(body, body.get("region")):
             begin_seconds = parse_time_seconds(p.get("begin"))
             end_seconds = parse_time_seconds(p.get("end"))
             if end_seconds <= offset_seconds:
                 continue
 
+            # オフセットを引いて、開始と終了が同じになってしまう場合はスキップする。
             start = format_time_seconds(begin_seconds - offset_seconds)
             end = format_time_seconds(end_seconds - offset_seconds)
             if start == end:
                 continue
 
-            region = p.get("region")
-            style_name = "Vertical" if region == "縦右" else "Default"
+            is_vertical = is_vertical_region(region, region_definitions)
+            style_name = "Vertical" if is_vertical else "Default"
             # 固定の style ID ではなく、TTML 側の fontStyle / fontShear 定義から判定する。
             resolved_style = resolve_element_style(p, style_definitions)
             italic = resolved_style["italic"]
@@ -620,18 +730,24 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
             parts = get_all_parts(p, ns, ruby_styles)
 
             if style_name == "Vertical":
+                # 縦書きの場合の処理
+                region_side = resolve_vertical_region_side(region, region_definitions)
                 render_positioned_vertical_dialogues(
                     ass_lines,
+                    measurer,
                     start,
                     end,
                     italic,
                     font_shear,
                     split_lines(parts),
                     tate_chu_yoko_styles,
+                    region_side,
                 )
             elif not has_ruby(parts):
+                # 横書き（ルビなし）の通常の処理
                 render_standard_dialogue(ass_lines, start, end, style_name, style_tag, parts)
             else:
+                # 横書き（ルビ付き）の処理
                 render_positioned_ruby_dialogues(
                     ass_lines,
                     measurer,
@@ -643,6 +759,7 @@ def convert_ttml_to_ass(ttml_input, ass_output, offset_seconds=0):
                 )
 
     with open(ass_output, "w", encoding="utf_8") as output_file:
+        # ASS ファイルに書き込み
         output_file.write("\n".join(ass_lines))
 
 
